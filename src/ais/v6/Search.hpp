@@ -8,7 +8,8 @@
 #include <algorithm>
 #include <chrono>
 #include <cstring>
-#include <cstdint> // Pour uint64_t
+#include <cstdint>
+#include <random>
 
 namespace AI_V6 {
 
@@ -18,156 +19,171 @@ namespace AI_V6 {
     static bool time_out;
     static SearchStats stats;
 
-    constexpr int INF = 10000;
+    constexpr int INF = 1000000; // Augmenté car on a des scores * 1000
+    constexpr int MAX_DEPTH = 64;
 
-    // --- 1. TABLE DE TRANSPOSITION (TT) ---
+    // --- 1. ZOBRIST HASHING (Niveau 1 : Vitesse) ---
+    // Table de nombres aléatoires pour calculer le hash instantanément
+    namespace Zobrist {
+        static uint64_t table[NB_HOLES][3][64]; // [Trou][Couleur][NbGraines]
+        static uint64_t turn_hash[2];           // Pour différencier le tour J1/J2
+        static bool initialized = false;
 
-    // Types de résultats stockés
-    enum class TTFlag : uint8_t {
-        EXACT,      // Score exact
-        LOWERBOUND, // Coupe Beta (le score est au moins égal à ça)
-        UPPERBOUND  // Coupe Alpha (le score est au plus égal à ça)
-    };
-
-    struct TTEntry {
-        uint64_t key;   // Hash unique du plateau (pour vérifier que c'est le bon)
-        int score;      // Le score mémorisé
-        int depth;      // La profondeur à laquelle on l'a calculé
-        TTFlag flag;    // Le type de score
-        Move best_move; // Le meilleur coup à jouer ici ! (C'est LUI qui sert au tri)
-    };
-
-    // Taille de la table : Doit être une puissance de 2. 
-    // 1048576 (2^20) entrées * ~24 octets = ~25 Mo de RAM. Très léger.
-    constexpr size_t TT_SIZE = 1048576;
-    static std::vector<TTEntry> transposition_table(TT_SIZE);
-
-    // Historique (Garde la V4 en fallback)
-    static int history_table[NB_HOLES][4];
-
-    // --- HASHING (FNV-1a Hash) ---
-    // Fonction rapide pour générer un ID unique de 64 bits pour le plateau
-    inline uint64_t compute_hash(const GameState& state) {
-        uint64_t hash = 14695981039346656037ULL;
-        // On hache le tableau de graines
-        for (int i = 0; i < TOTAL_CELLS; ++i) {
-            hash ^= state.board[i];
-            hash *= 1099511628211ULL;
+        inline void init() {
+            if (initialized) return;
+            std::mt19937_64 rng(12345); // Seed fixe pour être déterministe
+            for (int i = 0; i < NB_HOLES; ++i) {
+                for (int c = 0; c < 3; ++c) {
+                    for (int n = 0; n < 64; ++n) {
+                        table[i][c][n] = rng();
+                    }
+                }
+            }
+            turn_hash[0] = rng();
+            turn_hash[1] = rng();
+            initialized = true;
         }
-        // On pourrait hacher les scores, mais ce n'est pas strictement nécessaire pour le choix du coup
-        // On ajoute le joueur courant si besoin, mais ici l'AlphaBeta gère l'alternance.
-        return hash;
+
+        // Calcul rapide (O(N) mais XOR only, pas de multiplication lourde)
+        // Idéalement, ceci devrait être incrémental dans apply_move, mais ici on le recalcul vite.
+        inline uint64_t compute(const GameState& state, int player_id) {
+            uint64_t h = 0;
+            for (int i = 0; i < NB_HOLES; ++i) {
+                // On cap à 63 graines pour éviter overflow tableau
+                // On force la conversion en (int) pour satisfaire std::min
+                int r = std::min((int)state.get_seeds(i, RED), 63);
+                int b = std::min((int)state.get_seeds(i, BLUE), 63);
+                int t = std::min((int)state.get_seeds(i, TRANSPARENT), 63);
+
+                if (r > 0) h ^= table[i][0][r];
+                if (b > 0) h ^= table[i][1][b];
+                if (t > 0) h ^= table[i][2][t];
+            }
+            h ^= turn_hash[player_id - 1];
+            return h;
+        }
     }
 
-    // --- 2. EVALUATION "OPPORTUNISTE CALIBREE" (V6.3) ---
-    // --- 2. EVALUATION "CHIRURGICALE" (V7) ---
+    // --- 2. TABLE DE TRANSPOSITION ---
+    enum class TTFlag : uint8_t { EXACT, LOWERBOUND, UPPERBOUND };
+
+    struct TTEntry {
+        uint64_t key;
+        int score;
+        int depth;
+        TTFlag flag;
+        Move best_move;
+    };
+
+    constexpr size_t TT_SIZE = 2097152; // 2M entrées (~48 Mo RAM)
+    static std::vector<TTEntry> transposition_table(TT_SIZE);
+
+    // --- 3. KILLER MOVES (Niveau 2 : Heuristique) ---
+    // Stocke 2 coups qui ont provoqué un cutoff à cette profondeur
+    static Move killer_moves[MAX_DEPTH][2];
+
+    // Historique (Butterfly Heuristic)
+    static int history_table[NB_HOLES][4];
+
+    // --- 4. NOUVELLE EVALUATION (Intelligente) ---
+    // --- 4. EVALUATION STRATÉGIQUE ---
     inline int evaluate(const GameState& state, int maximizing_player_id) {
+        int score_p1 = state.score_p1;
+        int score_p2 = state.score_p2;
 
-        // 1. LE SCORE REEL (Le Roi)
-        // On garde 5000. Une graine capturée vaut 5000 points.
-        // Rien ne doit pouvoir compenser la perte d'une graine.
-        int score_me = (maximizing_player_id == 1) ? state.score_p1 : state.score_p2;
-        int score_opp = (maximizing_player_id == 1) ? state.score_p2 : state.score_p1;
+        // --- A. VICTOIRE / DÉFAITE IMMÉDIATE ---
+        // Si on a gagné, on renvoie l'infini. C'est la priorité absolue.
+        if (score_p1 >= 49) return (maximizing_player_id == 1) ? INF : -INF;
+        if (score_p2 >= 49) return (maximizing_player_id == 2) ? INF : -INF;
 
-        int evaluation = (score_me - score_opp) * 5000;
+        // --- B. SCORE MATÉRIEL (Le "cash") ---
+        // C'est la base. 1000 points par graine d'avance.
+        int my_real_score = (maximizing_player_id == 1) ? score_p1 : score_p2;
+        int opp_real_score = (maximizing_player_id == 1) ? score_p2 : score_p1;
 
-        // 2. ANALYSE DE POSITION (Tie-Breakers)
-        // On utilise des valeurs TRÈS FAIBLES.
-        // Le but est juste de dire : "À score égal, je préfère cette situation".
+        int eval = (my_real_score - opp_real_score) * 1000;
+
+        // --- C. ANALYSE TACTIQUE (Le "potentiel") ---
+        // On va scanner le plateau pour voir les opportunités et les dangers
+
+        int my_threats = 0;       // Occasions d'attaquer l'adversaire
+        int my_vulnerabilities = 0; // Mes trous en danger
+        int seeds_in_my_camp = 0;   // Pour évaluer le "Starving"
 
         for (int i = 0; i < NB_HOLES; ++i) {
             int seeds = state.count_total_seeds(i);
-            if (seeds == 0) continue;
-
             bool is_my_hole = GameRules::is_current_player_hole(i, maximizing_player_id);
 
             if (is_my_hole) {
-                // --- CHEZ MOI ---
+                seeds_in_my_camp += seeds;
 
-                // A. KRU (Accumulation)
-                // Bonus très léger (+5 par graine au-delà de 12).
-                // Max bonus possible ~50 pts (1/100ème d'une capture).
-                if (seeds > 12) {
-                    evaluation += (seeds - 12) * 5;
-                }
-
-                // B. MUNITIONS (Bleus/Trans)
-                // Avoir des munitions offensives est un léger plus.
-                int blues = state.get_seeds(i, BLUE);
-                int trans = state.get_seeds(i, TRANSPARENT);
-                evaluation += (blues + trans) * 2;
-
-            }
-            else {
-                // --- CHEZ L'ADVERSAIRE ---
-
-                // C. CIBLES POTENTIELLES
-                // Au lieu de +150, on met +10.
-                // C'est juste une "indication", pas une promesse de capture.
+                // DANGER DÉFENSIF
+                // Si j'ai un trou avec 1 ou 2 graines, l'adversaire peut tomber dessus et me voler !
+                // C'est très grave. On pénalise.
                 if (seeds == 1 || seeds == 2) {
-                    evaluation += 10;
+                    // Malus plus fort si c'est 2 graines (capture immédiate possible)
+                    my_vulnerabilities += (seeds == 2) ? 80 : 40;
                 }
-
-                // D. GÊNE
-                // Si l'adversaire a un très gros trou, petit malus
-                if (seeds > 15) {
-                    evaluation -= 20;
+            }
+            else { // Trou de l'adversaire
+                // OPPORTUNITÉ OFFENSIVE
+                // Si l'adversaire a 1 ou 2 graines, je peux potentiellement capturer.
+                // C'est très bon pour moi.
+                if (seeds == 1 || seeds == 2) {
+                    // Bonus plus fort si 2 graines (car une seule graine suffit pour capturer)
+                    my_threats += (seeds == 2) ? 100 : 50;
                 }
             }
         }
 
-        // PLUS DE MODE SURVIE ! 
-        // L'évaluation doit rester linéaire et stable.
+        // --- D. TOTAL ET AJUSTEMENTS ---
 
-        return evaluation;
+        // 1. On intègre les menaces
+        eval += my_threats;
+        eval -= my_vulnerabilities;
+
+        // 2. Gestion du "Starving" (Affamement)
+        // Si je n'ai plus de graines, je perds tout le reste. C'est la catastrophe.
+        // Si l'adversaire n'a plus de graines, je gagne tout. C'est le jackpot.
+        // (Note: La règle dit que celui qui n'a plus de graines perd les siennes restantes, 
+        // ou alors le jeu s'arrête. On simplifie ici : avoir des graines = survie).
+        if (seeds_in_my_camp == 0) {
+            eval -= 5000; // Quasi-défaite
+        }
+
+        return eval;
     }
 
-    // --- 3. HEURISTIQUE DE TRI (V4 + TT) ---
+    // --- 5. TRI DES COUPS (Move Ordering Complet) ---
     struct ScoredMove {
         Move move;
         int score;
         bool operator>(const ScoredMove& other) const { return score > other.score; }
     };
 
-    inline int score_move_for_ordering(const GameState& state, const Move& move, int player_id, const Move& tt_move) {
-        // 1. PRIORITÉ ABSOLUE : Si c'est le coup de la Table de Transposition
-        if (move.hole == tt_move.hole && move.type == tt_move.type) {
-            return 2000000; // Score énorme pour être trié en premier à 100%
-        }
+    inline int score_move(const GameState& state, const Move& move, int depth, const Move& tt_move) {
+        // 1. TT Move (Le ROI)
+        if (move.hole == tt_move.hole && move.type == tt_move.type) return 2000000;
 
-        // 2. Sinon, logique V4 classique
+        // 2. Captures (Simple simulation locale) - On favorise l'agressivité
+        // Note: Ici on pourrait remettre la logique "si trou adversaire a 1 ou 2 graines" 
+        // pour booster les captures, mais c'est lourd. On fait confiance à l'eval pour ça.
+
+        // 3. Killer Moves
+        if (move.hole == killer_moves[depth][0].hole && move.type == killer_moves[depth][0].type) return 1000000;
+        if (move.hole == killer_moves[depth][1].hole && move.type == killer_moves[depth][1].type) return 900000;
+
+        // 4. History Heuristic / Quantité de graines
         int seeds = 0;
         if (move.type == MoveType::RED) seeds = state.get_seeds(move.hole, RED);
         else if (move.type == MoveType::BLUE) seeds = state.get_seeds(move.hole, BLUE);
         else seeds = state.get_seeds(move.hole, TRANSPARENT);
 
-        if (seeds == 0) return -1000;
-        int heuristic_score = seeds;
-
-        // Simulation Prises Multiples (V4)
-        int final_hole = (move.hole + seeds) % NB_HOLES;
-        int current_check_hole = final_hole;
-        bool capturing = true;
-        int check_limit = 0;
-        while (capturing && check_limit < 4) {
-            if (GameRules::is_current_player_hole(current_check_hole, player_id)) break;
-            int total = state.count_total_seeds(current_check_hole);
-            if (current_check_hole == final_hole) total++;
-            if (total == 2 || total == 3) {
-                heuristic_score += total * 100;
-                current_check_hole = (current_check_hole - 1 + NB_HOLES) % NB_HOLES;
-                check_limit++;
-            }
-            else capturing = false;
-        }
-
-        // Bonus Historique
-        heuristic_score += history_table[move.hole][(int)move.type];
-        return heuristic_score;
+        // On combine le nombre de graines (immédiat) et l'histoire (long terme)
+        return seeds + history_table[move.hole][(int)move.type];
     }
 
     inline std::vector<Move> generate_moves(const GameState& state, int player_id) {
-        // (Copie de ton code V4 standard)
         std::vector<Move> moves;
         moves.reserve(16);
         for (int i = 0; i < NB_HOLES; ++i) {
@@ -181,11 +197,11 @@ namespace AI_V6 {
         return moves;
     }
 
-    // --- 4. ALPHA-BETA AVEC TT ---
-    int alpha_beta(GameState state, int depth, int alpha, int beta, int player_id, int maximizing_player_id) {
+    // --- 6. PVS (PRINCIPAL VARIATION SEARCH) - Niveau 3 ---
+    int alpha_beta_pvs(GameState state, int depth, int alpha, int beta, int player_id, int maximizing_player_id) {
         stats.nodes++;
 
-        // A. Check Time
+        // Check Time (tous les 2048 noeuds)
         if ((stats.nodes & 2047) == 0) {
             auto now = std::chrono::high_resolution_clock::now();
             if (std::chrono::duration<double, std::milli>(now - start_time).count() >= time_limit_ms) {
@@ -193,41 +209,23 @@ namespace AI_V6 {
             }
         }
 
-        int alpha_orig = alpha; // On garde l'alpha original pour savoir quel Flag mettre dans la TT
-
-        // B. TT PROBE (Lecture)
-        // On calcule le hash de la position actuelle
-        uint64_t hash = compute_hash(state);
-        // On trouve l'index dans le tableau (modulo taille)
+        int alpha_orig = alpha;
+        uint64_t hash = Zobrist::compute(state, player_id);
         int tt_index = hash % TT_SIZE;
         TTEntry& entry = transposition_table[tt_index];
+        Move tt_move;
 
-        Move tt_move; // Le meilleur coup mémorisé (si existe)
-
-        // Si on a une entrée valide pour cette position (Hash correspond)
+        // TT Probe
         if (entry.key == hash) {
-            tt_move = entry.best_move; // On le note pour le tri plus tard
-
-            // Si la profondeur stockée est suffisante (>= profondeur actuelle), on peut utiliser le score !
+            tt_move = entry.best_move;
             if (entry.depth >= depth) {
-                if (entry.flag == TTFlag::EXACT) {
-                    return entry.score; // Victoire ! On évite tout le calcul
-                }
-                if (entry.flag == TTFlag::LOWERBOUND) {
-                    alpha = std::max(alpha, entry.score);
-                }
-                else if (entry.flag == TTFlag::UPPERBOUND) {
-                    beta = std::min(beta, entry.score);
-                }
-
-                if (alpha >= beta) {
-                    stats.cutoffs++; // Coupure grâce à la TT
-                    return entry.score;
-                }
+                if (entry.flag == TTFlag::EXACT) return entry.score;
+                if (entry.flag == TTFlag::LOWERBOUND) alpha = std::max(alpha, entry.score);
+                else if (entry.flag == TTFlag::UPPERBOUND) beta = std::min(beta, entry.score);
+                if (alpha >= beta) { stats.cutoffs++; return entry.score; }
             }
         }
 
-        // C. Conditions de fin
         if (depth == 0 || state.score_p1 >= 49 || state.score_p2 >= 49 || state.moves_count >= 400) {
             return evaluate(state, maximizing_player_id);
         }
@@ -235,110 +233,103 @@ namespace AI_V6 {
         std::vector<Move> moves = generate_moves(state, player_id);
         if (moves.empty()) return evaluate(state, maximizing_player_id);
 
-        // D. TRI DES COUPS (Avec le TT Move en priorité)
-        if (depth > 0) { // Toujours trier sauf aux feuilles
-            std::vector<ScoredMove> scored_moves;
-            scored_moves.reserve(moves.size());
-            for (const auto& m : moves) {
-                // On passe 'tt_move' à la fonction de tri
-                int s = score_move_for_ordering(state, m, player_id, tt_move);
-                scored_moves.push_back({ m, s });
-            }
-            std::sort(scored_moves.begin(), scored_moves.end(), std::greater<ScoredMove>());
-            for (size_t i = 0; i < moves.size(); ++i) moves[i] = scored_moves[i].move;
+        // Sorting
+        std::vector<ScoredMove> scored_moves;
+        scored_moves.reserve(moves.size());
+        for (const auto& m : moves) {
+            scored_moves.push_back({ m, score_move(state, m, depth, tt_move) });
         }
+        std::sort(scored_moves.begin(), scored_moves.end(), std::greater<ScoredMove>());
 
-        // E. RECHERCHE
-        Move best_move_this_node; // Pour sauvegarder dans la TT
-        int best_val = -INF;
+        Move best_move_this_node;
+        int best_val = (player_id == maximizing_player_id) ? -INF : INF;
         int next_player = (player_id == 1) ? 2 : 1;
 
-        if (player_id == maximizing_player_id) {
-            best_val = -INF;
-            for (const auto& move : moves) {
-                GameState next_state = state;
-                GameRules::apply_move(next_state, move, player_id);
+        // --- BOUCLE PVS ---
+        for (size_t i = 0; i < scored_moves.size(); ++i) {
+            Move move = scored_moves[i].move;
+            GameState next_state = state;
+            GameRules::apply_move(next_state, move, player_id);
 
-                int val = alpha_beta(next_state, depth - 1, alpha, beta, next_player, maximizing_player_id);
+            int val;
 
-                if (time_out) return 0;
-
-                if (val > best_val) {
-                    best_val = val;
-                    best_move_this_node = move; // On a trouvé un nouveau meilleur coup
+            if (i == 0) {
+                // 1. Premier coup (PV) : Recherche fenêtre complète
+                val = alpha_beta_pvs(next_state, depth - 1, alpha, beta, next_player, maximizing_player_id);
+            }
+            else {
+                // 2. Autres coups : Recherche fenêtre nulle (Null Window Search)
+                // On suppose qu'ils ne vont pas améliorer le score (val <= alpha pour Max, val >= beta pour Min)
+                if (player_id == maximizing_player_id) {
+                    val = alpha_beta_pvs(next_state, depth - 1, alpha, alpha + 1, next_player, maximizing_player_id);
+                    if (val > alpha && val < beta) { // Fail-High : On s'est trompé, il faut re-chercher à fond
+                        val = alpha_beta_pvs(next_state, depth - 1, alpha, beta, next_player, maximizing_player_id);
+                    }
                 }
+                else {
+                    val = alpha_beta_pvs(next_state, depth - 1, beta - 1, beta, next_player, maximizing_player_id);
+                    if (val < beta && val > alpha) { // Fail-Low
+                        val = alpha_beta_pvs(next_state, depth - 1, alpha, beta, next_player, maximizing_player_id);
+                    }
+                }
+            }
 
+            if (time_out) return 0;
+
+            if (player_id == maximizing_player_id) {
+                if (val > best_val) { best_val = val; best_move_this_node = move; }
                 alpha = std::max(alpha, best_val);
                 if (beta <= alpha) {
                     stats.cutoffs++;
+                    // Update Killer & History
+                    if (move.hole != killer_moves[depth][0].hole || move.type != killer_moves[depth][0].type) {
+                        killer_moves[depth][1] = killer_moves[depth][0];
+                        killer_moves[depth][0] = move;
+                    }
                     history_table[move.hole][(int)move.type] += depth * depth;
                     break;
                 }
             }
-        }
-        else {
-            // Logique Min (Adversaire)
-            // Attention : Ici best_val doit être vu du point de vue de Max pour la remontée, 
-            // mais l'élagage se fait sur Min. Pour simplifier, on garde la structure standard Min/Max.
-            best_val = INF;
-            for (const auto& move : moves) {
-                GameState next_state = state;
-                GameRules::apply_move(next_state, move, player_id);
-
-                int val = alpha_beta(next_state, depth - 1, alpha, beta, next_player, maximizing_player_id);
-
-                if (time_out) return 0;
-
-                if (val < best_val) {
-                    best_val = val;
-                    best_move_this_node = move; // Meilleur coup pour Min (le pire pour nous)
-                }
-
+            else {
+                if (val < best_val) { best_val = val; best_move_this_node = move; }
                 beta = std::min(beta, best_val);
                 if (beta <= alpha) {
                     stats.cutoffs++;
+                    // Update Killer & History
+                    if (move.hole != killer_moves[depth][0].hole || move.type != killer_moves[depth][0].type) {
+                        killer_moves[depth][1] = killer_moves[depth][0];
+                        killer_moves[depth][0] = move;
+                    }
                     history_table[move.hole][(int)move.type] += depth * depth;
                     break;
                 }
             }
         }
 
-        // F. TT STORE (Sauvegarde)
-        // On ne sauvegarde pas si on a time out, car le résultat est partiel/faux
         if (!time_out) {
             TTEntry new_entry;
             new_entry.key = hash;
             new_entry.score = best_val;
             new_entry.depth = depth;
-            new_entry.best_move = best_move_this_node; // On sauve le coup qui a généré ce score
+            new_entry.best_move = best_move_this_node;
 
-            if (best_val <= alpha_orig) {
-                new_entry.flag = TTFlag::UPPERBOUND; // On n'a pas tout exploré, mais c'est <= à ce qu'on voulait
-            }
-            else if (best_val >= beta) {
-                new_entry.flag = TTFlag::LOWERBOUND; // Coupure Beta
-            }
-            else {
-                new_entry.flag = TTFlag::EXACT; // Score exact
-            }
+            if (best_val <= alpha_orig) new_entry.flag = TTFlag::UPPERBOUND;
+            else if (best_val >= beta) new_entry.flag = TTFlag::LOWERBOUND;
+            else new_entry.flag = TTFlag::EXACT;
 
-            // Stratégie de remplacement : On remplace toujours (ou si profondeur plus grande)
-            // Ici simple : on remplace toujours (plus récent = souvent plus pertinent dans l'arbre)
+            // Remplacement : Profondeur plus grande OU collision d'une vieille entrée
             transposition_table[tt_index] = new_entry;
         }
 
         return best_val;
     }
 
-    // --- 5. INTERFACE ---
+    // --- 7. INTERFACE ---
     inline Move find_best_move(const GameState& root_state, int player_id, double time_limit_sec) {
+        Zobrist::init(); // S'assurer que c'est init
         stats.reset();
         std::memset(history_table, 0, sizeof(history_table));
-
-        // On ne reset PAS la transposition_table ici ! 
-        // On veut garder les infos du tour précédent (c'est ça la force du système)
-        // Sauf si tu veux faire des tests unitaires isolés. Pour un match, garde-la.
-        // Si tu veux reset : std::fill(transposition_table.begin(), transposition_table.end(), TTEntry{});
+        std::memset(killer_moves, 0, sizeof(killer_moves)); // Reset killers
 
         start_time = std::chrono::high_resolution_clock::now();
         time_limit_ms = (time_limit_sec * 1000.0) - 50.0;
@@ -349,65 +340,40 @@ namespace AI_V6 {
 
         Move best_move_found = moves[0];
 
-        // Pour la racine, on utilise aussi la TT pour le tri initial
-        // Mais comme on appelle alpha_beta itérativement, la TT se remplit et s'améliore.
-
-        for (int depth = 1; depth <= 64; ++depth) {
-            int best_score_this_depth = -INF;
-            Move best_move_this_depth = moves[0];
-            bool this_depth_completed = true;
-
+        // Iterative Deepening
+        for (int depth = 1; depth <= MAX_DEPTH; ++depth) {
             int alpha = -INF;
             int beta = INF;
             int next_player = (player_id == 1) ? 2 : 1;
 
-            // On trie les coups à la racine avant de lancer l'itération
-            // On utilise la TT (probe) sur la racine pour savoir quel coup mettre en premier
-            uint64_t root_hash = compute_hash(root_state);
-            int root_index = root_hash % TT_SIZE;
-            Move root_tt_move = (transposition_table[root_index].key == root_hash) ? transposition_table[root_index].best_move : Move();
+            // Pour la racine, on appelle directement le PVS ou une version simplifiée
+            // Ici on appelle notre PVS
+            int score = alpha_beta_pvs(root_state, depth, alpha, beta, player_id, player_id);
 
-            std::vector<ScoredMove> root_scored_moves;
-            for (const auto& m : moves) {
-                root_scored_moves.push_back({ m, score_move_for_ordering(root_state, m, player_id, root_tt_move) });
-            }
-            std::sort(root_scored_moves.begin(), root_scored_moves.end(), std::greater<ScoredMove>());
-            for (size_t i = 0; i < moves.size(); ++i) moves[i] = root_scored_moves[i].move;
+            if (time_out) break;
 
-
-            for (const auto& move : moves) {
-                GameState next_state = root_state;
-                GameRules::apply_move(next_state, move, player_id);
-                int score = alpha_beta(next_state, depth - 1, alpha, beta, next_player, player_id);
-
-                if (time_out) { this_depth_completed = false; break; }
-
-                if (score > best_score_this_depth) {
-                    best_score_this_depth = score;
-                    best_move_this_depth = move;
-                }
-                alpha = std::max(alpha, score);
-            }
-
-            if (this_depth_completed) {
-                best_move_found = best_move_this_depth;
-                stats.max_depth = depth;
+            // Extraction du meilleur coup depuis la TT (plus fiable que le retour de fonction)
+            uint64_t root_hash = Zobrist::compute(root_state, player_id);
+            TTEntry& entry = transposition_table[root_hash % TT_SIZE];
+            if (entry.key == root_hash && entry.flag == TTFlag::EXACT) {
+                best_move_found = entry.best_move;
             }
             else {
-                break;
+                // Fallback si la TT n'a pas save (rare) ou collision
+                // On pourrait garder le best_move_found de la profondeur précédente
             }
+
+            stats.max_depth = depth;
         }
 
+        // Log final
         auto end_time = std::chrono::high_resolution_clock::now();
         stats.time_ms = std::chrono::duration<double, std::milli>(end_time - start_time).count();
         if (stats.time_ms > 0) stats.nps = (long long)(stats.nodes * 1000.0 / stats.time_ms);
 
-        std::cout << "[AI v6] D:" << stats.max_depth
-            << " Nodes:" << stats.nodes
-            << " Cutoffs:" << stats.cutoffs
+        std::cout << "[AI V6 TURBO] D:" << stats.max_depth
             << " NPS:" << stats.nps
-            << " Time:" << std::fixed << std::setprecision(0) << stats.time_ms << "ms"
-            << std::endl;
+            << " Cutoffs:" << stats.cutoffs << std::endl;
 
         return best_move_found;
     }

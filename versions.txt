@@ -6,7 +6,7 @@ la v2 calcule le score exact pour le pruning donc est parfaite, mais la v3 est p
 
 v4 : v3 + Amélioration de l'heurestique pour qu'elle soit plus précise, on regarde les 4 derniers trous du coup pour être plus précis que la v3
 on ajoute du hasard, si 2 coups sont équivalents on choisit aléatoirement entre les 2 pour éviter de toujours faire les mêmes coups dans une situation identique
-sinon la v4 tourne sur une boucle contre la v3 et leurs scores restent à 0
+sinon la v4 tourne sur une boucle contre la v3 et leurs scores restent à 0  // Pas une solution
 
 v5 : Utilise une table de transposition pour mémoriser les états déjà évalués et éviter les recalculs inutiles
 

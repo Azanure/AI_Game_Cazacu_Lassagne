@@ -17,6 +17,7 @@
 #include "ais/v4/Search.hpp"
 #include "ais/v5/Search.hpp"
 #include "ais/v6/Search.hpp"
+#include "ais/v7/Search.hpp"
 
 // --- FONCTION D'AFFICHAGE DU PLATEAU (NOUVEAU) ---
 void display_board(const GameState& s) {
@@ -130,6 +131,10 @@ PlayerAdapter get_player_config(int mode, int player_num) {
         player.play_func = [time_limit](const GameState& s, int p) { return AI_V6::find_best_move(s, p, time_limit); };
         player.get_stats_func = []() { return AI_V6::stats; };
         break;
+    case 7:
+		player.play_func = [time_limit](const GameState& s, int p) { return AI_V7::find_best_move(s, p, time_limit); };
+		player.get_stats_func = []() { return AI_V7::stats; };
+		break;
     default:
         std::cerr << "Version inconnue. Exit." << std::endl;
         exit(1);
