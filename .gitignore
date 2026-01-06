@@ -21,7 +21,6 @@ obj/
 *.recipe
 
 # Executables
-*.exe
 *.dll
 *.lib
 *.so

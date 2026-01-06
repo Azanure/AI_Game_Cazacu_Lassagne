@@ -18,6 +18,7 @@
 #include "ais/v5/Search.hpp"
 #include "ais/v6/Search.hpp"
 #include "ais/v7/Search.hpp"
+#include "ais/v8/Search.hpp"
 
 // --- FONCTION D'AFFICHAGE DU PLATEAU (NOUVEAU) ---
 void display_board(const GameState& s) {
@@ -88,12 +89,68 @@ PlayerAdapter get_player_config(int mode, int player_num) {
     if (mode == 1 && player_num == 1) {
         player.name = "Humain";
         player.play_func = [](const GameState& s, int p) {
-            int hole;
-            std::cout << ">> [Humain] Trou (0-15) : ";
-            while (!(std::cin >> hole) || hole < 0 || hole > 15) {
-                std::cin.clear(); std::cin.ignore(10000, '\n');
+            int input_hole;
+            int actual_index;
+            char colorChar;
+
+            while (true) {
+                // 1. Choix du trou (1-16 pour être cohérent avec l'affichage)
+                std::cout << "\n>> [Ton Tour] Choisis un trou (1-16) : ";
+                if (!(std::cin >> input_hole)) {
+                    std::cin.clear(); std::cin.ignore(10000, '\n'); continue;
+                }
+
+                actual_index = input_hole - 1; // Conversion 1-16 vers 0-15
+
+                // Vérif validité basique
+                if (actual_index < 0 || actual_index > 15) {
+                    std::cout << "XX Trou invalide (doit etre entre 1 et 16) !\n";
+                    continue;
+                }
+
+                // Vérif appartenance (P1 ne peut jouer que les trous pairs 0,2,4...)
+                if (!GameRules::is_current_player_hole(actual_index, 1)) {
+                    std::cout << "XX Ce trou appartient a l'adversaire (P2) !\n";
+                    std::cout << "   Tes trous sont : 1, 3, 5, 7, 9, 11, 13, 15\n";
+                    continue;
+                }
+
+                // Vérif s'il y a des graines
+                int r = s.get_seeds(actual_index, RED);
+                int b = s.get_seeds(actual_index, BLUE);
+                int t = s.get_seeds(actual_index, TRANSPARENT);
+                if (r == 0 && b == 0 && t == 0) {
+                    std::cout << "XX Ce trou est vide !\n";
+                    continue;
+                }
+
+                // 2. Choix de la couleur
+                std::cout << ">> Choisis la couleur (r=Rouge, b=Bleu, t=Transparent) : ";
+                std::cin >> colorChar;
+
+                if (colorChar == 'r') {
+                    if (r > 0) return Move(actual_index, MoveType::RED);
+                    else std::cout << "XX Pas de graines Rouges ici !\n";
+                }
+                else if (colorChar == 'b') {
+                    if (b > 0) return Move(actual_index, MoveType::BLUE);
+                    else std::cout << "XX Pas de graines Bleues ici !\n";
+                }
+                else if (colorChar == 't') {
+                    if (t > 0) {
+                        // Pour les transparents, on doit choisir comment les jouer
+                        std::cout << ">> Jouer les Transparents comme (r)ouge ou (b)leu ? : ";
+                        char subColor;
+                        std::cin >> subColor;
+                        if (subColor == 'r') return Move(actual_index, MoveType::TRANS_AS_RED);
+                        if (subColor == 'b') return Move(actual_index, MoveType::TRANS_AS_BLUE);
+                    }
+                    else std::cout << "XX Pas de graines Transparentes ici !\n";
+                }
+                else {
+                    std::cout << "XX Couleur inconnue.\n";
+                }
             }
-            return Move(hole, MoveType::RED); // TODO: Gérer choix couleur pour l'humain si besoin
             };
         player.get_stats_func = []() { return SearchStats(); };
         return player;
@@ -104,7 +161,7 @@ PlayerAdapter get_player_config(int mode, int player_num) {
     std::cin >> v;
     player.name = "IA_v" + std::to_string(v);
 
-    double time_limit = 0.1; // 0.2s par défaut
+    double time_limit = 2; // 0.2s par défaut
 
     switch (v) {
     case 1:
@@ -135,6 +192,10 @@ PlayerAdapter get_player_config(int mode, int player_num) {
 		player.play_func = [time_limit](const GameState& s, int p) { return AI_V7::find_best_move(s, p, time_limit); };
 		player.get_stats_func = []() { return AI_V7::stats; };
 		break;
+    case 8:
+		player.play_func = [time_limit](const GameState& s, int p) { return AI_V8::find_best_move(s, p, time_limit); };
+		player.get_stats_func = []() { return AI_V8::stats; };
+        break;
     default:
         std::cerr << "Version inconnue. Exit." << std::endl;
         exit(1);

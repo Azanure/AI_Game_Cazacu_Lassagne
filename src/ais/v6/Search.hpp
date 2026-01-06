@@ -371,10 +371,6 @@ namespace AI_V6 {
         stats.time_ms = std::chrono::duration<double, std::milli>(end_time - start_time).count();
         if (stats.time_ms > 0) stats.nps = (long long)(stats.nodes * 1000.0 / stats.time_ms);
 
-        std::cout << "[AI V6 TURBO] D:" << stats.max_depth
-            << " NPS:" << stats.nps
-            << " Cutoffs:" << stats.cutoffs << std::endl;
-
         return best_move_found;
     }
 };
