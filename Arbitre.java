@@ -1,60 +1,14 @@
 import java.io.*;
 import java.util.concurrent.*;
 
-// CLASSE DUPLIQUÉE POUR GARDER UNE COPIE LOGGÉE
-public class ArbitreTemporaire {
-    private static final int TIMEOUT_SECONDS = 3;
-
-    // Custom Logger pour écrire à la fois dans la console et dans un fichier
-    static class TeeOutputStream extends OutputStream {
-        private final OutputStream out1;
-        private final OutputStream out2;
-
-        public TeeOutputStream(OutputStream out1, OutputStream out2) {
-            this.out1 = out1;
-            this.out2 = out2;
-        }
-
-        @Override
-        public void write(int b) throws IOException {
-            out1.write(b);
-            out2.write(b);
-        }
-
-        @Override
-        public void write(byte[] b, int off, int len) throws IOException {
-            out1.write(b, off, len);
-            out2.write(b, off, len);
-        }
-
-        @Override
-        public void flush() throws IOException {
-            out1.flush();
-            out2.flush();
-        }
-
-        @Override
-        public void close() throws IOException {
-            out1.close();
-            out2.close();
-        }
-    }
+public class Arbitre {
+    private static final int TIMEOUT_SECONDS = 3; // Temps limite pour chaque coup
 
     public static void main(String[] args) throws Exception {
-        // --- MISE EN PLACE DU FICHIER LOG ---
-        PrintStream originalOut = System.out;
-        String logFileName = "partie_log.txt";
-        FileOutputStream fileOut = new FileOutputStream(logFileName);
-        TeeOutputStream tee = new TeeOutputStream(originalOut, fileOut);
-        PrintStream multiOut = new PrintStream(tee);
-        System.setOut(multiOut); // Redirection de System.out
+        // Chemins des exécutables des joueurs
+        String commandA = args.length > 0 ? args[0] : ".\\BotCazacuLassagne.exe";
+        String commandB = args.length > 1 ? args[1] : ".\\bot_test.exe";
 
-        // --- DEBUT DU CODE ORIGINAL ADAPTÉ ---
-
-        String commandA = args.length > 0 ? args[0] : ".\\player.exe";
-        String commandB = args.length > 1 ? args[1] : ".\\player.exe";
-
-        System.out.println("LOGGING ENABLED -> " + logFileName);
         System.out.println("Lancement de la partie:");
         System.out.println("J1: " + commandA);
         System.out.println("J2: " + commandB);
@@ -74,7 +28,10 @@ public class ArbitreTemporaire {
 
         try {
             while (true) {
+                // Envoi du coup précédent
                 courant.send(coup);
+
+                // Reception de la réponse
                 String reponse = courant.getResponse(TIMEOUT_SECONDS);
 
                 if (reponse == null) {
@@ -83,6 +40,7 @@ public class ArbitreTemporaire {
                     break;
                 }
 
+                // Parsing et Validation
                 Move move = Move.parse(reponse);
                 if (move == null || !GameRules.isValidMove(state, move, currentPlayerId)) {
                     System.out.println("RESULT INVALID_MOVE " + state.scoreP1 + " " + state.scoreP2 + " (" + courant.nom
@@ -90,16 +48,22 @@ public class ArbitreTemporaire {
                     break;
                 }
 
+                // Application du coup
                 GameRules.applyMove(state, move, currentPlayerId);
+
+                // Affichage du plateau
                 printBoard(state);
 
                 System.out.println("JOUEUR " + courant.nom + " joue : " + reponse);
+                // Affichage du résultat demandé
                 System.out.println("RESULT " + reponse + " " + state.scoreP1 + " " + state.scoreP2);
 
+                // Vérification fin de partie
                 if (GameRules.isGameOver(state)) {
                     if (state.movesCount >= 400) {
                         System.out.println("RESULT LIMIT " + state.scoreP1 + " " + state.scoreP2);
                     }
+                    // Notifier les joueurs de la fin de la partie
                     try {
                         courant.send("RESULT " + state.scoreP1 + " " + state.scoreP2);
                         autre.send("RESULT " + state.scoreP1 + " " + state.scoreP2);
@@ -108,6 +72,7 @@ public class ArbitreTemporaire {
                     break;
                 }
 
+                // Changement de joueur
                 coup = reponse;
                 Joueur tmp = courant;
                 courant = autre;
@@ -117,15 +82,16 @@ public class ArbitreTemporaire {
         } finally {
             joueurA.destroy();
             joueurB.destroy();
-            multiOut.close(); // Ferme le flux
         }
     }
 
+    // --- AFFICHAGE PLATEAU ---
     static void printBoard(GameState state) {
         System.out.println("\n+---------------------------------------------------------------+");
         System.out.println(String.format("| MOVES: %-3d | SCORE J1: %-3d | SCORE J2: %-3d |  Total: %-3d |",
                 state.movesCount, state.scoreP1, state.scoreP2, state.countAllSeedsOnBoard()));
         System.out.println("+---------------------------------------------------------------+");
+        // Affichage des trous 1 à 16
         for (int i = 0; i < 16; i++) {
             String owner = (i % 2 == 0) ? "J1" : "J2";
             int r = state.getSeeds(i, 0);
@@ -136,6 +102,8 @@ public class ArbitreTemporaire {
         }
         System.out.println("+---------------------------------------------------------------+\n");
     }
+
+    // --- CLASSES INTERNES ---
 
     static class Joueur {
         String nom;
@@ -174,13 +142,14 @@ public class ArbitreTemporaire {
 
     static class GameState {
         static final int NB_HOLES = 16;
-        static final int NB_COLORS = 3;
+        static final int NB_COLORS = 3; // R=0, B=1, T=2
         byte[] board = new byte[NB_HOLES * NB_COLORS];
         int scoreP1 = 0;
         int scoreP2 = 0;
         int movesCount = 0;
 
         GameState() {
+            // 2 graines de chaque couleur par trou
             for (int i = 0; i < board.length; i++)
                 board[i] = 2;
         }
@@ -214,8 +183,8 @@ public class ArbitreTemporaire {
     }
 
     static class Move {
-        int hole;
-        int type;
+        int hole; // 0-15
+        int type; // 0=R, 1=B, 2=TR, 3=TB
 
         Move(int hole, int type) {
             this.hole = hole;
@@ -257,7 +226,7 @@ public class ArbitreTemporaire {
 
         static boolean isP1Hole(int hole) {
             return (hole % 2) == 0;
-        }
+        } // 0, 2, 4 (1,3,5...)
 
         static boolean isCurrentPlayerHole(int hole, int playerId) {
             return (playerId == 1) ? isP1Hole(hole) : !isP1Hole(hole);
@@ -266,15 +235,19 @@ public class ArbitreTemporaire {
         static boolean isValidMove(GameState state, Move move, int playerId) {
             if (!isCurrentPlayerHole(move.hole, playerId))
                 return false;
+
             int r = state.getSeeds(move.hole, RED);
             int b = state.getSeeds(move.hole, BLUE);
             int t = state.getSeeds(move.hole, TRANS);
+
+            // Doit avoir des graines correspondant au type
             if (move.type == 0 && r == 0)
-                return false;
+                return false; // RED
             if (move.type == 1 && b == 0)
-                return false;
+                return false; // BLUE
             if ((move.type == 2 || move.type == 3) && t == 0)
-                return false;
+                return false; // TRANS
+
             return true;
         }
 
@@ -284,22 +257,24 @@ public class ArbitreTemporaire {
         }
 
         static void applyMove(GameState state, Move move, int playerId) {
+            // 1. Harvest
             int seedsTrans = 0, seedsColor = 0, colorPlayed = RED;
-            if (move.type == 0) {
+
+            if (move.type == 0) { // RED
                 seedsColor = state.getSeeds(move.hole, RED);
                 state.clearSeeds(move.hole, RED);
                 colorPlayed = RED;
-            } else if (move.type == 1) {
+            } else if (move.type == 1) { // BLUE
                 seedsColor = state.getSeeds(move.hole, BLUE);
                 state.clearSeeds(move.hole, BLUE);
                 colorPlayed = BLUE;
-            } else if (move.type == 2) {
+            } else if (move.type == 2) { // TRANS_AS_RED
                 seedsTrans = state.getSeeds(move.hole, TRANS);
                 seedsColor = state.getSeeds(move.hole, RED);
                 state.clearSeeds(move.hole, TRANS);
                 state.clearSeeds(move.hole, RED);
                 colorPlayed = RED;
-            } else if (move.type == 3) {
+            } else if (move.type == 3) { // TRANS_AS_BLUE
                 seedsTrans = state.getSeeds(move.hole, TRANS);
                 seedsColor = state.getSeeds(move.hole, BLUE);
                 state.clearSeeds(move.hole, TRANS);
@@ -307,25 +282,32 @@ public class ArbitreTemporaire {
                 colorPlayed = BLUE;
             }
 
+            // 2. Sow
             int currentHole = move.hole;
+            // Phase 0: Trans, Phase 1: Color
             for (int phase = 0; phase < 2; phase++) {
                 int seedsToSow = (phase == 0) ? seedsTrans : seedsColor;
                 int typeToSow = (phase == 0) ? TRANS : colorPlayed;
+
                 while (seedsToSow > 0) {
                     currentHole = (currentHole + 1) % 16;
                     if (currentHole == move.hole)
                         continue;
+
                     if (colorPlayed == BLUE && isCurrentPlayerHole(currentHole, playerId))
                         continue;
+
                     state.addSeeds(currentHole, typeToSow, 1);
                     seedsToSow--;
                 }
             }
 
+            // 3. Capture
             int captureHole = currentHole;
             boolean keepCapturing = true;
             int safeguard = 0;
-            while (keepCapturing && safeguard < 35) {
+
+            while (keepCapturing && safeguard < 35) { // Safeguard pour éviter une boucle infinie
                 safeguard++;
                 int total = state.countTotalSeeds(captureHole);
                 if (total == 2 || total == 3) {
@@ -333,10 +315,12 @@ public class ArbitreTemporaire {
                     state.clearSeeds(captureHole, RED);
                     state.clearSeeds(captureHole, BLUE);
                     state.clearSeeds(captureHole, TRANS);
+
                     if (playerId == 1)
                         state.scoreP1 += captured;
                     else
                         state.scoreP2 += captured;
+
                     captureHole = (captureHole - 1 + 16) % 16;
                 } else {
                     keepCapturing = false;

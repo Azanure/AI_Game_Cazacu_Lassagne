@@ -123,7 +123,7 @@ namespace AI
     static std::vector<TTEntry> transposition_table(TT_SIZE); // Table de transposition
 
     // --- 3. HEURISTIQUES DE TRI ---
-    static Move killer_moves[MAX_DEPTH][2]; // Deux coups tueurs par profondeur
+    static Move killer_moves[MAX_DEPTH + 1][2]; // Deux coups tueurs par profondeur
     static int history_table[NB_HOLES][4];  // Table d'historique des coups
 
     // --- 4. EVALUATION ---
@@ -198,9 +198,9 @@ namespace AI
     }
 
     // Génère tous les coups légaux pour le joueur courant
-    inline StaticVector<Move, 40> generate_moves(const GameState &state, int player_id)
+    inline StaticVector<Move, 70> generate_moves(const GameState &state, int player_id)
     {
-        StaticVector<Move, 40> moves;
+        StaticVector<Move, 70> moves;
         for (int i = 0; i < NB_HOLES; ++i)
         {
             if (!GameRules::is_current_player_hole(i, player_id))
@@ -274,7 +274,7 @@ namespace AI
         }
 
         // Génération et tri des coups
-        StaticVector<Move, 40> moves = generate_moves(state, player_id);
+        StaticVector<Move, 70> moves = generate_moves(state, player_id);
         if (moves.empty())
             return evaluate(state, maximizing_player_id);
 
@@ -287,7 +287,7 @@ namespace AI
         };
 
         // Tri des coups selon leur score
-        StaticVector<ScoredMove, 40> scored_moves;
+        StaticVector<ScoredMove, 70> scored_moves;
         for (int i = 0; i < moves.size(); ++i)
         {
             scored_moves.push_back({moves[i], score_move(state, moves[i], depth, tt_move)});
@@ -408,7 +408,7 @@ namespace AI
         time_out = false;
 
         // Génération des coups initiaux
-        StaticVector<Move, 40> moves = generate_moves(root_state, player_id);
+        StaticVector<Move, 70> moves = generate_moves(root_state, player_id);
         if (moves.empty())
             return Move();
 

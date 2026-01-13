@@ -3,9 +3,6 @@
 #include <vector>
 #include <limits>
 #include <sstream>
-#include <fstream>
-#include <chrono>
-#include <iomanip>
 
 #include "GameState.hpp"
 #include "GameRules.hpp"
@@ -14,27 +11,7 @@
 
 using namespace std;
 
-// --- LOGGING POUR DEBUG ---
-ofstream debug_file;
 
-void init_debug()
-{
-    // Ouvre le fichier en mode "append" pour ne pas ecraser si 2 joueurs
-    debug_file.open("player_debug.txt", ios::app);
-    debug_file << "=== NOUVEAU LANCEMENT ===" << endl;
-}
-
-void log_msg(const string &msg)
-{
-    if (debug_file.is_open())
-    {
-        auto now = chrono::system_clock::now();
-        auto in_time_t = chrono::system_clock::to_time_t(now);
-        debug_file << std::put_time(std::localtime(&in_time_t), "%X") << " - " << msg << endl;
-        debug_file.flush(); // Force l'ecriture immediate
-    }
-}
-// --------------------------
 
 // Convertit un coup interne (0-15) en string pour l'Arbitre (1-16)
 string move_to_string(const Move &m)
@@ -96,9 +73,6 @@ Move string_to_move(const string &s)
 
 int main()
 {
-    init_debug();
-    log_msg("Main started. Waiting for input.");
-
     // Optimisation des flux d'entrée/sortie
     ios_base::sync_with_stdio(false);
     cin.tie(NULL);
@@ -114,17 +88,13 @@ int main()
         if (input_line.empty())
             continue;
 
-        log_msg("Received input: " + input_line);
-
         // 1. GESTION START
         if (input_line == "START")
         {
             my_player_id = 1;
-            log_msg("I am Player 1. Thinking...");
 
             // Je joue le premier coup
-            Move best_move = AI::find_best_move(state, my_player_id, 2.5);
-            log_msg("Move found: " + move_to_string(best_move));
+            Move best_move = AI::find_best_move(state, my_player_id, 2);
 
             GameRules::apply_move(state, best_move, my_player_id);
 
@@ -135,7 +105,6 @@ int main()
         // 2. GESTION END
         if (input_line == "END" || input_line.find("RESULT") != string::npos)
         {
-            log_msg("Game Over signal received.");
             break;
         }
 
@@ -143,7 +112,6 @@ int main()
         if (my_player_id == 0)
         {
             my_player_id = 2;
-            log_msg("I am Player 2.");
         }
 
         int opponent_id = (my_player_id == 1) ? 2 : 1;
@@ -154,13 +122,10 @@ int main()
         {
             // Appliquer le coup adverse sur mon plateau local
             GameRules::apply_move(state, opp_move, opponent_id);
-            log_msg("Applied opponent move: " + input_line);
         }
 
         // 4. A MON TOUR DE JOUER
-        log_msg("My turn. Thinking...");
-        Move best_move = AI::find_best_move(state, my_player_id, 2.5);
-        log_msg("Move found: " + move_to_string(best_move));
+        Move best_move = AI::find_best_move(state, my_player_id, 2);
 
         // Appliquer mon coup localement
         GameRules::apply_move(state, best_move, my_player_id);
