@@ -4,11 +4,10 @@ import java.util.concurrent.*;
 public class Arbitre {
     private static final int TIMEOUT_SECONDS = 3; // Temps limite pour chaque coup
 
-
     public static void main(String[] args) throws Exception {
         // Chemins des exécutables des joueurs
         String commandA = args.length > 0 ? args[0] : ".\\BotCazacuLassagne.exe";
-        String commandB = args.length > 1 ? args[1] : ".\\AlphawaleZero.exe";
+        String commandB = args.length > 1 ? args[1] : ".\\BotCazacuLassagne.exe";
 
         System.out.println("Lancement de la partie:");
         System.out.println("A: " + commandA);
@@ -80,7 +79,7 @@ public class Arbitre {
                     } else {
                         System.out.println("RESULT END " + state.scoreP1 + " " + state.scoreP2);
                     }
-                    
+
                     // Notifier les joueurs de la fin de la partie
                     try {
                         courant.send("RESULT " + state.scoreP1 + " " + state.scoreP2);

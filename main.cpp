@@ -4,14 +4,12 @@
 #include <limits>
 #include <sstream>
 
-#include "GameState.hpp"
-#include "GameRules.hpp"
-#include "Move.hpp"
-#include "Search.hpp"
+#include "src/GameState.hpp"
+#include "src/GameRules.hpp"
+#include "src/Move.hpp"
+#include "src/Search.hpp"
 
 using namespace std;
-
-
 
 // Convertit un coup interne (0-15) en string pour l'Arbitre (1-16)
 string move_to_string(const Move &m)
