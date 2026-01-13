@@ -51,11 +51,15 @@ Move string_to_move(const string &s)
     }
 
     // Extraction du type de coup
-    string suffix = s.substr(num_len);
+    string raw_suffix = s.substr(num_len);
+    string suffix = "";
 
-    // Normaliser en majuscules pour la robustesse
-    for (auto &c : suffix)
-        c = toupper(c);
+    // Nettoyage et normalisation (supprime les espaces/\r et met en majuscules)
+    for (char c : raw_suffix) {
+        if (!isspace(c)) {
+            suffix += toupper(c);
+        }
+    }
 
     MoveType type = MoveType::RED;
 
@@ -84,6 +88,9 @@ int main()
     // Boucle principale
     while (getline(cin, input_line))
     {
+        // Nettoyage de l'entrée (suppression des retours chariot type Windows)
+        if (!input_line.empty() && input_line.back() == '\r')
+            input_line.pop_back();
 
         if (input_line.empty())
             continue;
@@ -125,7 +132,13 @@ int main()
         }
 
         // 4. A MON TOUR DE JOUER
-        Move best_move = AI::find_best_move(state, my_player_id, 2);
+        Move best_move = AI::find_best_move(state, my_player_id, 2.0);
+
+        if (best_move.hole == 255)
+        {
+            // Aucun coup trouvé : on n'envoie rien et on attend la réaction de l'arbitre (ou timeout)
+             continue;
+        }
 
         // Appliquer mon coup localement
         GameRules::apply_move(state, best_move, my_player_id);

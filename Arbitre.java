@@ -4,20 +4,21 @@ import java.util.concurrent.*;
 public class Arbitre {
     private static final int TIMEOUT_SECONDS = 3; // Temps limite pour chaque coup
 
+
     public static void main(String[] args) throws Exception {
         // Chemins des exécutables des joueurs
         String commandA = args.length > 0 ? args[0] : ".\\BotCazacuLassagne.exe";
-        String commandB = args.length > 1 ? args[1] : ".\\BotCazacuLassagne.exe";
+        String commandB = args.length > 1 ? args[1] : ".\\AlphawaleZero.exe";
 
         System.out.println("Lancement de la partie:");
-        System.out.println("J1: " + commandA);
-        System.out.println("J2: " + commandB);
+        System.out.println("A: " + commandA);
+        System.out.println("B: " + commandB);
 
         Process A = Runtime.getRuntime().exec(commandA);
         Process B = Runtime.getRuntime().exec(commandB);
 
-        Joueur joueurA = new Joueur("J1", A);
-        Joueur joueurB = new Joueur("J2", B);
+        Joueur joueurA = new Joueur("A", A);
+        Joueur joueurB = new Joueur("B", B);
 
         Joueur courant = joueurA;
         Joueur autre = joueurB;
@@ -28,6 +29,25 @@ public class Arbitre {
 
         try {
             while (true) {
+                // Vérification Famine (Starvation) avant de demander le coup
+                if (!GameRules.hasMoves(state, currentPlayerId)) {
+                    int remaining = state.countAllSeedsOnBoard();
+                    // Le joueur courant ne peut pas jouer, l'autre ramasse tout
+                    if (currentPlayerId == 1)
+                        state.scoreP2 += remaining;
+                    else
+                        state.scoreP1 += remaining;
+
+                    System.out.println("RESULT FAMINE " + state.scoreP1 + " " + state.scoreP2 + " (Joueur "
+                            + courant.nom + " affamé)");
+                    try {
+                        courant.send("RESULT " + state.scoreP1 + " " + state.scoreP2);
+                        autre.send("RESULT " + state.scoreP1 + " " + state.scoreP2);
+                    } catch (Exception e) {
+                    }
+                    break;
+                }
+
                 // Envoi du coup précédent
                 courant.send(coup);
 
@@ -51,18 +71,16 @@ public class Arbitre {
                 // Application du coup
                 GameRules.applyMove(state, move, currentPlayerId);
 
-                // Affichage du plateau
-                printBoard(state);
-
-                System.out.println("JOUEUR " + courant.nom + " joue : " + reponse);
-                // Affichage du résultat demandé
-                System.out.println("RESULT " + reponse + " " + state.scoreP1 + " " + state.scoreP2);
+                System.out.println(courant.nom + " -> " + reponse);
 
                 // Vérification fin de partie
                 if (GameRules.isGameOver(state)) {
                     if (state.movesCount >= 400) {
                         System.out.println("RESULT LIMIT " + state.scoreP1 + " " + state.scoreP2);
+                    } else {
+                        System.out.println("RESULT END " + state.scoreP1 + " " + state.scoreP2);
                     }
+                    
                     // Notifier les joueurs de la fin de la partie
                     try {
                         courant.send("RESULT " + state.scoreP1 + " " + state.scoreP2);
@@ -83,24 +101,6 @@ public class Arbitre {
             joueurA.destroy();
             joueurB.destroy();
         }
-    }
-
-    // --- AFFICHAGE PLATEAU ---
-    static void printBoard(GameState state) {
-        System.out.println("\n+---------------------------------------------------------------+");
-        System.out.println(String.format("| MOVES: %-3d | SCORE J1: %-3d | SCORE J2: %-3d |  Total: %-3d |",
-                state.movesCount, state.scoreP1, state.scoreP2, state.countAllSeedsOnBoard()));
-        System.out.println("+---------------------------------------------------------------+");
-        // Affichage des trous 1 à 16
-        for (int i = 0; i < 16; i++) {
-            String owner = (i % 2 == 0) ? "J1" : "J2";
-            int r = state.getSeeds(i, 0);
-            int b = state.getSeeds(i, 1);
-            int t = state.getSeeds(i, 2);
-            System.out.println(String.format("| %2d (%s) | R:%2d | B:%2d | T:%2d | Total:%2d |",
-                    i + 1, owner, r, b, t, (r + b + t)));
-        }
-        System.out.println("+---------------------------------------------------------------+\n");
     }
 
     // --- CLASSES INTERNES ---
@@ -230,6 +230,14 @@ public class Arbitre {
 
         static boolean isCurrentPlayerHole(int hole, int playerId) {
             return (playerId == 1) ? isP1Hole(hole) : !isP1Hole(hole);
+        }
+
+        static boolean hasMoves(GameState state, int playerId) {
+            for (int i = 0; i < 16; i++) {
+                if (isCurrentPlayerHole(i, playerId) && state.countTotalSeeds(i) > 0)
+                    return true;
+            }
+            return false;
         }
 
         static boolean isValidMove(GameState state, Move move, int playerId) {
